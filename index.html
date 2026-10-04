@@ -472,10 +472,59 @@
       tone('triangle', f / 2, f / 2, 0.05, 0.018);
     },
     lantern() { [880, 1320, 1760].forEach((f, i) => tone('sine', f, f, 0.55 - i * 0.1, 0.07 - i * 0.015, i * 0.04)); },
+    // A caught bat shrieks: three detuned saws with a shivering vibrato, swooping up then wailing down through
+    // a narrowing vocal-ish band, a breathy hiss on top and a ghostly echo trailing behind
     eatBat() {
-      noise(0.25, 0.18, 2400, 600, 'bandpass');
-      tone('sine', 220, 1800, 0.4, 0.08);
-      tone('square', 440, 3600, 0.3, 0.02);
+      if (!AC || muted) return;
+      const t = AC.currentTime, dur = 0.95;
+      const out = AC.createGain();
+      out.gain.setValueAtTime(0.0001, t);
+      out.gain.exponentialRampToValueAtTime(0.1, t + 0.04);
+      out.gain.setValueAtTime(0.1, t + 0.3);
+      out.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      const bp = AC.createBiquadFilter();
+      bp.type = 'bandpass'; bp.Q.value = 2.5;
+      bp.frequency.setValueAtTime(3400, t);
+      bp.frequency.exponentialRampToValueAtTime(1300, t + dur);
+      const vib = AC.createOscillator(), vg = AC.createGain();
+      vib.frequency.setValueAtTime(15, t);
+      vib.frequency.linearRampToValueAtTime(6, t + dur);
+      vg.gain.value = 70;
+      vib.connect(vg);
+      const oscs = [vib];
+      for (const det of [-16, 0, 13]) {
+        const o = AC.createOscillator();
+        o.type = 'sawtooth';
+        o.detune.value = det;
+        o.frequency.setValueAtTime(1400, t);
+        o.frequency.exponentialRampToValueAtTime(2300, t + 0.12);
+        o.frequency.exponentialRampToValueAtTime(560, t + dur);
+        vg.connect(o.frequency);
+        o.connect(bp);
+        oscs.push(o);
+      }
+      const hiss = AC.createBufferSource(), hp = AC.createBiquadFilter(), hg = AC.createGain();
+      hiss.buffer = noiseBuf; hiss.loop = true;
+      hp.type = 'highpass'; hp.frequency.value = 2500;
+      hg.gain.value = 0.35;
+      hiss.connect(hp); hp.connect(hg); hg.connect(out);
+      oscs.push(hiss);
+      bp.connect(out);
+      const dl = AC.createDelay(0.5), fb = AC.createGain(), wet = AC.createGain();
+      dl.delayTime.value = 0.13; fb.gain.value = 0.42; wet.gain.value = 0.55;
+      out.connect(master);
+      out.connect(dl); dl.connect(fb); fb.connect(dl); dl.connect(wet); wet.connect(master);
+      for (const o of oscs) { o.start(t); o.stop(t + dur + 0.05); }
+      setTimeout(() => { try { fb.disconnect(); wet.disconnect(); } catch (e) { /* gone */ } }, 2500);
+    },
+    // The bat bites down on the firefly: four crunches, each a gritty snap over a jaw thud
+    chomp() {
+      for (let i = 0; i < 4; i++) {
+        const d = i * 0.14;
+        noise(0.07, 0.32, 2200, 500, 'bandpass', d);
+        tone('square', 150, 55, 0.09, 0.08, d);
+        tone('sawtooth', 360, 170, 0.05, 0.03, d + 0.01);
+      }
     },
     bonus() { [76, 79, 84, 88, 91].forEach((m, i) => tone('square', midi(m), midi(m), 0.08, 0.04, i * 0.06)); },
     die() {
@@ -627,7 +676,7 @@
   let hero = null, bats = [], SPD = speeds(1), SCHED = schedule(1);
   let modeIdx = 0, modeT = 0, frightT = 0, frightLen = 0, eatChain = 0;
   let batDots = [0, 0, 0, 0], useGlobal = false, globalDots = 0, noDotT = 0;
-  let bonus = null, eatPop = null, floats = [], parts = [];
+  let bonus = null, eatPop = null, biter = null, floats = [], parts = [];
 
   function tryStart() {
     if (mode === 'attract' || (mode === 'over' && overT > 60)) startGame();
@@ -667,7 +716,7 @@
     hero = { x: 112, y: 188, dir: 1, want: 1, acc: 0, stall: 0, moving: false, anim: 0 };
     bats = BAT.map((d, i) => ({ idx: i, x: d.x, y: d.y, dir: d.dir, state: d.state, acc: 0, fright: false }));
     modeIdx = 0; modeT = 0; frightT = 0; frightLen = 0; eatChain = 0; noDotT = 0;
-    eatPop = null; floats = []; parts = [];
+    eatPop = null; biter = null; floats = []; parts = [];
   }
   function addScore(n) {
     score += n;
@@ -841,7 +890,9 @@
         stopVoices();
       } else {
         phase = 'dying'; phaseT = 0;
+        biter = b;
         stopVoices();
+        sfx.chomp();
       }
       return true;
     }
@@ -965,7 +1016,7 @@
     dot(x + 1.8 + DX[d] * 0.7, y - 1 + DY[d] * 0.8, 0.85);
   }
   // A night bat facing the player: scalloped wings flapping, pointed ears, eyes following its heading
-  function drawBat(idx, x, y, dir, t, look = 'normal') {
+  function drawBat(idx, x, y, dir, t, look = 'normal', bite = 0) {
     if (look === 'wisp') {
       glow(x, y, 10, '#9fd8ff', 0.4);
       ctx.fillStyle = 'rgba(159,216,255,0.25)';
@@ -1001,7 +1052,20 @@
     ell(x, y, 4, 4.6); ctx.fill();
     ctx.fillStyle = 'rgba(255,255,255,0.14)';
     ell(x, y + 1.5, 2.2, 2.4); ctx.fill();
-    if (look === 'normal') {
+    if (look === 'normal' && bite > 0) {
+      // jaws snapping on the firefly: eyes narrowed, mouth gaping with fangs top and bottom
+      drawEyes(x, y - 0.6, dir);
+      ctx.fillStyle = '#2a0610';
+      ell(x, y + 2.4, 2.3, 0.4 + bite * 1.6); ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      for (const s of [-1, 1]) {
+        const top = y + 2.4 - 0.4 - bite * 1.6, bot = y + 2.4 + 0.4 + bite * 1.6;
+        ctx.beginPath(); ctx.moveTo(x + s * 0.5, top); ctx.lineTo(x + s * 1.6, top); ctx.lineTo(x + s * 1.05, top + 1.3);
+        ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(x + s * 0.5, bot); ctx.lineTo(x + s * 1.6, bot); ctx.lineTo(x + s * 1.05, bot - 1.1);
+        ctx.closePath(); ctx.fill();
+      }
+    } else if (look === 'normal') {
       drawEyes(x, y, dir);
       ctx.fillStyle = '#ffffff';
       for (const s of [-1, 1]) {
@@ -1112,9 +1176,11 @@
     ctx.save();
     ctx.beginPath(); ctx.rect(0, MY, W, ROWS * TS); ctx.clip();
     const batsShown = mode === 'play' && !((phase === 'dying' || phase === 'clear') && phaseT >= 60);
+    const biting = phase === 'dying' && phaseT < 60 && biter;
     if (batsShown) {
       for (const b of bats) {
         if (phase === 'eat' && eatPop && eatPop.b === b) continue;
+        if (biting && b === biter) continue;
         drawBat(b.idx, b.x, MY + b.y, b.dir, frame + b.idx * 9, batLook(b));
       }
     }
@@ -1122,6 +1188,14 @@
       if (phase === 'dying' && phaseT >= 60) {
         const p = clamp((phaseT - 60) / 80, 0, 1);
         if (p < 1) drawFirefly(hero.x, MY + hero.y, hero.dir, frame, { spin: p * p * 14, scale: 1 - p * 0.85, flare: 1 + Math.sin(p * Math.PI) * 1.6, still: true, alpha: 1 - p * 0.6 });
+      } else if (biting) {
+        // the firefly jolts with each crunch, and the biter is drawn over it with its jaws snapping in time
+        // with the four chomps (0.14 s apart)
+        const k = (phaseT % 8.4) / 8.4, crunching = phaseT < 34;
+        const jolt = crunching && k < 0.3 ? 1 : 0;
+        drawFirefly(hero.x + rand(-1, 1) * jolt, MY + hero.y + rand(-1, 1) * jolt, hero.dir, hero.anim, { still: true });
+        const open = crunching ? (k < 0.3 ? 0.05 : (k - 0.3) / 0.7) : 0.35;
+        drawBat(biter.idx, biter.x, MY + biter.y, biter.dir, frame + biter.idx * 9, 'normal', open);
       } else if (phase !== 'eat') {
         drawFirefly(hero.x, MY + hero.y, hero.dir, hero.anim, { still: !hero.moving && phase === 'run' });
       }
